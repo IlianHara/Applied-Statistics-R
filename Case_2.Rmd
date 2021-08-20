@@ -1,0 +1,233 @@
+---
+title: "Case 2"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+df <- read.csv("merged_data.csv", header = TRUE)
+head(df)
+```
+## Factorize variables
+
+```{r}
+plot(consumption~I(21-temp), df, col = df$ID)
+
+library(lubridate)
+df$date <- as_date(df$date)
+factor_cols <- c("ID","dir","cond", "fog", "rain")
+df[factor_cols] <- lapply(df[factor_cols], factor) 
+
+head(df)
+```
+
+### Check for correlations
+```{r}
+df_cor <- subset(df, select = -c(ID,dir,cond, fog, rain ,date))
+#plot(df_cor)
+
+# Dew_pt needs to be excluded
+df <- subset(df, select = -dew_pt)
+
+head(df)
+```
+
+
+## Normalize consumption
+
+```{r}
+df_norm2 <- df
+library(data.table)
+df_norm2 <- setDT(df_norm2)[, consumption := consumption / mean(consumption), by = ID]
+```
+
+
+### Add weekday to the dataframe and build a simple model
+```{r}
+df_norm2$weekday <- weekdays(as.Date(df_norm2$date))
+
+lm1d <- lm(consumption ~ ID + I(21-temp) + ID:I(21-temp), df_norm2)
+
+library(car)
+library(carData)
+Anova(lm1d)
+summary(lm1d)
+par(mfrow = c(2,2))
+plot(lm1d)
+
+```
+
+```{r} 
+# Plot anova table
+anova_1 <- Anova(lm1d)
+
+library(kableExtra)
+anova_1 %>%
+  kable(caption = "ANCOVA (simple model)", digits = 20) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  as_image()
+
+```
+
+
+### Remove outliers
+
+```{r}
+plot(lm1d$residuals, xlab = "Observation", ylab = "Residuals")
+df_res <- df_norm2
+df_res$residuals <- lm1d$residuals
+df_res <- subset(df_res, residuals > -sd(residuals)*2.5 & residuals < sd(residuals)*2.5)
+plot(df_res$residuals,xlab = "Observation", ylab = "Residuals")
+```
+## Check the model diagnostics
+
+```{r}
+#lm1e <- lm(consumption ~ ID + I(21-temp)+ weekday + ID:I(21-temp) + ID:weekday + I(21-temp):weekday , df_res)
+
+lm1e <- lm(consumption ~ ID + I(21-temp) + ID:I(21-temp), df_res)
+
+
+par(mfrow = c(2,2))
+plot(lm1e)
+
+#anova(lm1e)
+#summary(lm1e)
+```
+
+```{r}
+summary(df)
+```
+
+## Complex model
+
+### Select variables
+
+
+```{r}
+#lm2a <- lm(consumption ~ ID + I(21-temp) + dir + cond + weekday + wind_spd + ID:I(21-temp) + ID:weekday + I(21-temp):dir, df_selected)
+
+
+df_modelling <- subset(df_res, select = -c(date, residuals))
+df_modelling$temp_diff <- I(21 - df_modelling$temp)
+
+
+remove(df, df_cor, df_norm, df_norm2, df_res)
+
+
+lm2a <- lm(consumption ~ ID + I(21-temp) + weekday + wind_spd + cond + hum, df_modelling)
+
+anova(lm2a)
+summary(lm2a)
+
+par(mfrow = c(2,2))
+plot(lm2a)
+```
+## Reduce the model
+
+```{r}
+lm2c <- step(lm2a, k = log(dim(df_modelling)[1]), scope = ~.^2) #forward and backwards
+```
+
+```{r}
+library(car)
+library(carData)
+Anova(lm2c)
+
+#the linearly dependent variables
+ld.vars <- attributes(alias(lm2c)$Complete)$dimnames[[1]]
+
+lm2d <- update(lm2c, .~.-weekday:cond)
+lm2d <- update(lm2d, .~.-I(21-temp):cond)
+lm2d <- update(lm2d, .~.-cond:hum)
+lm2d <- update(lm2d, .~.-wind_spd:cond)
+
+par(mfrow = c(2,2))
+plot(lm2d)
+```
+
+```{r}
+anova_2c <- Anova(lm2c)
+anova_2c %>%
+  kable(digits = 20) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  as_image()
+```
+
+```{r}
+anova_2d <- Anova(lm2d)
+anova_2d %>%
+  kable(digits = 20) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  as_image()
+```
+
+```{r}
+summary_2d <- summary(lm2d)
+
+summary_2d$coefficients[161:204,] %>%
+  kable(digits = 20) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  as_image()
+```
+
+```{r}
+#the linearly dependent variables
+ld.vars <- attributes(alias(lm2c)$Complete)$dimnames[[1]]
+
+```
+
+```{r}
+model_summ <- summary(lm2d)
+model_coeff <- data.frame(model_summ$coefficients) 
+
+model_coeff$ID <- seq.int(nrow(model_coeff))
+```
+
+
+```{r}
+model_coeff$names <- rownames(model_coeff)
+
+
+coeff_df <- model_coeff[102:183,c(1,6)] #ID###:I(21-temp)
+coeff_vector <- coeff_df[, 1]
+
+temp_diff_intercept <- model_coeff[84,c(1,6)] #I(21-temp)
+temp_diff_intercept_value <- temp_diff_intercept[,1]
+
+df_coeffs <- rbind(temp_diff_intercept, coeff_df)
+coeff_vector2 <- append(temp_diff_intercept_value, coeff_vector)
+
+A <- diag(length(coeff_vector2))
+A[,1] <- 1
+insulation <- A %*% coeff_vector2
+df_insulation <- data.frame(insulation)
+df_insulation$ID <- df_coeffs$names
+
+df_ordered <- df_insulation[order(df_insulation$insulation, decreasing = TRUE),]
+```
+
+
+```{r}
+est <- A %*% coeff_vector2
+var_est <- A %*% model_summ$cov.unscaled[c(84,102:183),c(84,102:183)] %*% t(A) * model_summ$sigma^2
+coef <- data.frame(Building=levels(df_modelling$ID), Slope = est, sd.error=sqrt(diag(var_est)))
+coef$CI_UP <- coef$Slope + qt(0.975, lm2d$df.residual)*coef$sd.error
+coef$CI_DOWN <- coef$Slope + qt(0.025, lm2d$df.residual)*coef$sd.error
+coef_ordered <- coef[order(coef$Slope, decreasing = TRUE),]
+```
+
+```{r}
+coef_ordered[1:15, ] %>%
+  kable(digits = 20) %>%
+  kable_classic(full_width = F, html_font = "Cambria") %>%
+  as_image()
+```
+
+```{r}
+
+```
+
